@@ -1,0 +1,290 @@
+---
+title: 'Latent class and latent profile analysis: a primer'
+author: "Johannes Bauer"
+date: 'Last change: 2021/01/14'
+output:
+  html_document:
+---
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(fig.width = 12,        # Figure width (in)
+                      fig.height = 5,       # Figure height (in)
+                      fig.align = 'left', # Center figures
+                      echo = TRUE,          # Repeat code
+                      eval = TRUE,          # Evaluate chunks
+                      message = FALSE,      # Don't print messages
+                      warning = FALSE,      # Don't print warnings
+                      cache = TRUE)         # reuse the results until the code chunk is altered 
+```
+
+```{r, message = FALSE}
+# Load required packages
+library(tidyverse)
+library(ggthemes)
+library(cowplot)
+library(mclust)
+library(tidyLPA)
+```
+
+# Example 1: Univariate LPA of student achievement data
+
+This script relates to section XXX of Bauer (year) and reproduces the example of a univariate latent profile analysis (LPA) of student achievement. 
+
+## 1 Data simulation
+
+We first simulate a data set of *N* = 1000 on a continuous variable (achievement). The data come from two known classes A (30%) and B (70%) that differ in their achievement. 
+
+```{r}
+set.seed(123456)
+N1 = 300
+N2 = 700
+kc_a <- rnorm(N1, m = 15, sd = 3)
+kc_b <- rnorm(N2, m = 30, sd = 5)
+mix <- c(kc_a, kc_b)  # mixed distribution
+dat1 <- data.frame(true_class = rep(c("A", "B"), times = c(300, 700)), value = mix)
+```
+
+Below, we plot the empirical and population distributions (cf. Fig. 1).
+```{r,echo = FALSE, fig.width=12, fig.height=6}
+# Empirical
+a <- ggplot(dat1, aes(x = value, y = ..density..)) +
+  geom_histogram(fill = "lightgrey", binwidth = 2) +
+  geom_density() +
+  theme_few() +
+  labs(x = "Achievement", y = "Probability Density") +
+  ylim(0, 0.06) +
+  xlim(0, 50)
+
+# Population
+fmix <- function(x) .3 * dnorm(x, m = 15, sd = 3) + .7 * dnorm(x, m = 30, sd = 5)
+fa <- function(x) .3 * dnorm(x, m = 15, sd = 3)
+fb <- function(x) .7 * dnorm(x, m = 30, sd = 5)
+
+b <- ggplot(data.frame(x = c(0:50)), aes(x = x)) +
+  stat_function(fun = fmix) +
+  stat_function(fun = fa, geom = "area", fill = 2, alpha = .2) +
+  stat_function(fun = fb, geom = "area", fill = 4, alpha = .2 ) +
+  theme_few() +
+  labs(x = "Achievement", y = "Probability Density") +
+  ylim(0, 0.06) +
+  xlim(0, 50)
+
+plot_grid(a, b, labels = c("a", "b"))
+```
+
+## 2 Latent profile analysis
+
+Now we use the simulated data in a LPA to see how it recovers the latent classes from the achievement data. We will use the packages `mclust`and `tidyLPA` for this purpose. 
+
+In the first step, we estimate the model to decide on the number of latent classes. We also use the bootstrapped LRT (BLRT) for this purpose. 
+
+```{r}
+# Estimate the and and plot BIC for solutions with different number of latent classes
+m1 <- Mclust(data = mix)
+plot(m1, what = "BIC", modelName = "V")  # "V" = Variances allowed to vary across classes
+
+# BLRT
+LRT <-  mclustBootstrapLRT(mix, modelName = "V", maxG = 3)  # Takes long!
+LRT
+```
+
+From the results, we manually produce a table of fit indices.
+
+```{r, results=FALSE}
+# Table of fit indices
+ll <- mclustLoglik(mclustBIC(mix))[, 2][1:4]
+npara <- NULL
+for (i in 1:4) {
+  npara[i] <- nMclustParams(modelName = "V", d = 1, G = i)
+}
+npara
+AIC <- 2 * npara - 2 * ll[1:4]
+fit1 <- data.frame(
+  nClasses = 1:4,
+  Log.Likelihood = ll[1:4],
+  AIC = AIC,
+  BIC = m1$BIC[1:4, 2],
+  ICL = mclustICL(mix)[1:4, 2],
+  BLRT = c(NA, LRT$obs),
+  p = c(NA, LRT$p.value)
+)
+```
+```{r}
+round(fit1, 2)
+```
+
+`tidyLPA` conveniently provides us with a broad array of fit indices. 
+
+```{r}
+# Get more fit indices from tidyLPA
+estimate_profiles(mix, n_profiles = 1:4, variances = "varying") %>%
+  get_fit()
+```
+
+All results indicate that the model with classes fits the data best. Note that in `mclust`*higher* values on information indices (AIC, BIC, etc.) indicate better fit, whereas in `tidyLPA` the more usual rule of *lower* values indicating better fit is used.
+
+Having decided on the number of latent classes, we inspect the results for the two-class model in the next step. The output looks differently, depending on which package you use. 
+
+```{r}
+# Mclust
+summary(m1, parameters = TRUE)
+
+# tidyLPA
+estimate_profiles(mix, n_profiles = 2, variances = "varying") %>%
+  get_estimates()
+```
+
+The following code gives us information on the quality of the classification. 
+
+```{r}
+# Average latent class probabilities for most likely latent class membership
+round(aggregate(
+  x = 1 - m1$uncertainty,
+  by = list(m1$classification),
+  FUN = "mean"
+) , 2)
+```
+
+Because we are working with simulated data, we can check to what the LPA recovered the true class membership. For this purpose, first, we cross-tabulate true and estimated latent class membership. Second, we use the function `classError()` from `mclust` that shows which cases were misclassified.
+
+```{r}
+# - Misclassification: True class vs. most likely class membership -
+mlcm <- m1$classification
+addmargins(table(dat1$true_class, mlcm))
+classError(dat1$true_class, mlcm)
+```
+
+We see that of our *N* = 1000 cases 25 were misclassified, yielding `r (1 - mclust::classError(dat1$true_class, mlcm)$errorRate) * 100`% correct classification. 
+
+
+
+# Example 2: Multivariate LPA of work recovery
+
+
+We analyze simulated data for a LPA with three indicators of work recovery to
+mimic results given in Gillet et al. (2020), Study 1 (Tab S11). Variables
+are: overcommitment (overcom), psychological detachment (pdetach) and
+rumination (rumin). The last column contains class membership (lc). N = 500.
+
+For reading in the data, put the data file in the same folder as the R-script
+file.
+
+wr <- read.table("analyses/wr_data.txt", header = TRUE)
+head(wr)
+boxplot(wr)
+
+
+
+# --- LPA using mclust and tidyLPA---
+
+# - Select best model and number of classes -
+
+# Model fit from mclust
+m1 <- Mclust(wr, G = 1:8)
+summary(m1)
+plot(m1, what = "BIC")  # Model fit for various parameterizations
+plot(m1, what = "BIC", model = "VVI")  # Model fit for VVI-Model (= variances varying across classes, covariances restricted to zero).
+
+
+# BLRT
+set.seed(123456)
+LRT <-
+  mclustBootstrapLRT(wr, modelName = "VVI", maxG = 5)  # Only for 5 classes sinc it takes long!
+LRT
+
+# More fit indiced from tidyLPA
+set.seed(123456)
+m1t <- wr %>%
+  estimate_profiles(n_profiles = 1:8,
+                    variances = "varying",
+                    covariances = "zero")
+compare_solutions(m1t)  # What ist the best fitting model?
+fitm1t <- get_fit(m1t)
+fitm1t
+fitm1t %>%
+  select(Classes, AIC, CAIC, BIC, SABIC) %>%
+  pivot_longer(cols = !Classes,
+               names_to = "Index",
+               values_to = "value") %>%
+  ggplot(aes(x = Classes, y = value, shape = Index)) +
+  geom_line() +
+  geom_point(size = 2) +
+  theme_few() +
+  labs(shape = "Fit Index")
+
+
+
+# - Refit the identified best model with four latent classes -
+
+# Get model parameters
+m1.4 <- Mclust(wr, G = 4)
+summary(m1.4, parameters = TRUE)
+
+# Plot mean profiles of the classes
+m1$parameters$mean %>%
+  data.frame() %>%
+  rename(
+    Class1 = X1,
+    Class2 = X2,
+    Class3 = X3,
+    Class4 = X4
+  ) %>%
+  mutate(Var = row.names(m1$parameters$mean)) %>%
+  pivot_longer(!Var,
+               names_to = "Class",
+               values_to = "Mean") %>%
+  ggplot(aes(
+    x = Var,
+    y = Mean,
+    col = Class,
+    group = Class
+  )) +
+  geom_hline(yintercept = 0, col = "grey60") +
+  geom_line() +
+  geom_point(aes(shape = Class), size = 2) +
+  ylim(-3, 3) +
+  scale_x_discrete(labels = c("Overcommitment",
+                              "Psy. Detachment",
+                              "Rumination")) +
+  theme_few() +
+  scale_color_few(palette = "Medium") +
+  labs(x = "", col = "", shape = "")
+
+
+# Average Latent Class Probabilities for Most Likely Latent Class Membership
+round(aggregate(
+  x = 1 - m1$uncertainty,
+  by = list(m1$classification),
+  FUN = "mean"
+), 2)
+
+
+# Plot mixture densities through dimensionality reduction
+clust <- MclustDR(m1)
+
+plot(clust, what = "boundaries", ngrid = 200)  # shows cluster boundaries:
+# clusters are well separated
+plot(clust, what = "density", dimens = 1)
+
+
+## 1 Vorbereitung der Daten
+
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r cars}
+summary(cars)
+```
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+plot(pressure)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
